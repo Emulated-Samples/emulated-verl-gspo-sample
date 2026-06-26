@@ -1,0 +1,55 @@
+# License
+
+Copyright © 2026 Emulated, Inc. All rights reserved.
+
+This repository and its contents, including but not limited to datasets, task
+definitions, prompts, solutions, traces, evaluation data, code, documentation,
+and metadata, are proprietary intellectual property of Emulated, Inc.
+
+This repository is made publicly visible solely for limited review and
+evaluation.
+
+You may:
+
+* View the contents of this repository for evaluation purposes.
+
+You may not, without prior written permission from Emulated, Inc.:
+
+* Copy, reproduce, redistribute, publish, mirror, or share the contents outside
+  your organization.
+* Use the contents to train, fine-tune, evaluate, benchmark, or improve machine
+  learning models or agents.
+* Create derivative datasets, tasks, benchmarks, environments, or products based
+  on this repository.
+* Use the contents for commercial purposes.
+* Sell, sublicense, rent, host, expose through an API, or otherwise make the
+  contents available to third parties.
+* Remove copyright, license, provenance, or attribution notices.
+
+This repository is not open source. No rights are granted except those expressly
+stated above or required by GitHub's Terms of Service.
+
+Making this repository public necessarily allows other GitHub users to view and
+fork it through GitHub's Terms of Service. Emulated, Inc. grants no rights beyond
+that GitHub-level functionality. Any copy obtained by viewing, forking, or
+cloning may be used solely for internal, non-commercial evaluation and remains
+subject to all restrictions in this license.
+
+## Third-party components
+
+This repository bundles third-party open-source software that is **not** covered
+by the proprietary terms above and remains licensed under its own original terms.
+In particular, the `workspace/` directory contains the verl source tree (a copy of
+`volcengine/verl`, v0.5.0.dev), licensed under the Apache License 2.0 (see
+`workspace/LICENSE`; Copyright Bytedance Ltd. and/or its affiliates). Nothing in
+this license restricts your rights in, or purports to relicense, those
+third-party components.
+
+The proprietary terms above apply **only** to the RL-environment materials
+authored by Emulated, Inc. — the task definition, prompts, grader and checks,
+environment configuration (`environment/`, `hyperfocal.yaml`), setup/provisioning
+code, fixtures, the sandbox/CI topology, documentation, and metadata — and to the
+selection, arrangement, and compilation of this repository as a whole. They do
+**not** apply to the third-party sources under `workspace/`.
+
+For licensing, research access, or commercial use, contact: founders@emulated.so

@@ -1,0 +1,328 @@
+- id: gspo-implementation
+  default: true
+  prompt: |
+    Implement Group Sequence Policy Optimization from the GSPO paper as an alternative to the GRPO loss. Here is the relevant section from the GSPO paper:
+
+
+    <PAPER>
+
+    \section{Preliminaries}
+
+    \paragraph{Notation}
+    In this paper, an autoregressive language model parameterized by $\theta$ is defined as a policy $\pi_\theta$.
+    We use $x$ to denote a query and $\mathcal{D}$ as the query set.
+    Given a response $y$ to a query $x$, its likelihood under the policy $\pi_\theta$ is denoted as $\pi_\theta (y | x)=\prod_{t=1}^{|y|} \pi_\theta (y_t | x, y_{<t} )$ where $|y|$ denotes the number of tokens in $y$.
+    A query-response pair $(x, y)$ can be scored by a verifier $r$, resulting in a reward $r(x, y) \in [ 0, 1 ]$.
+
+    \paragraph{Proximal Policy Optimization (PPO)}
+    Using samples generated from the old policy $\pi_{\theta_\text{old}}$, PPO \citep{ppo} constrains the policy update within a proximal region of the old policy through the clipping mechanism.
+    Specifically, PPO employs the following objective for policy optimization (we omit the KL regularization term hereinafter for brevity, as it is not the focus of this paper):
+    \begin{align}
+    \mathcal{J}_\text{PPO}(\theta) = \mathbb{E}_{ x \sim \mathcal{D},\, y \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ \frac{1}{|y|} \sum_{t=1}^{|y|} 
+    \min \left( w_{t}(\theta) \widehat{A}_{t},  \, \mathrm{clip} \left( w_{t}(\theta), 1 - {\varepsilon}, 1 + {\varepsilon}\right) \widehat{A}_{t} \right)
+    \right],
+    \end{align}
+    where the importance ratio of the token $y_t$ is defined as
+    $
+    w_{t}(\theta) = \frac{ \pi_{\theta} (y_{t} | x, y_{<t}) }{ \pi_{\theta_\text{old}} (y_{t} | x,y_{<t})}
+    $,
+    the advantage $\widehat{A}_{t}$ of $y_t$ is estimated by another value model, and $\varepsilon$ is the clipping range of importance ratios.
+
+    The core challenge of PPO in practice lies in its heavy reliance on the value model.
+    Specifically, the value model usually has a similar size to the policy model, introducing a considerable memory and computational burden.
+    Furthermore, the algorithmic effectiveness hinges on the reliability of its value estimate.
+    While acquiring a reliable value model is inherently challenging, ensuring its scalability to longer responses and more complex tasks presents an even greater challenge.
+
+    \paragraph{Group Relative Policy Optimization (GRPO)}
+    GRPO \citep{grpo} bypasses the need for the value model by computing the relative advantage of each response within a group of responses to the same query.
+    Specifically, GRPO optimizes the following objective:
+    \begin{align}
+    \label{equ:grpo}
+    \mathcal{J}_\text{GRPO}(\theta) = \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ \frac{1}{G} \sum_{i=1}^{G} \frac{1}{|y_i|} \sum_{t=1}^{|y_i|} 
+    \min \left( w_{i,t}(\theta) \widehat{A}_{i,t},  \, \mathrm{clip} \left( w_{i,t}(\theta), 1 - {\varepsilon}, 1 + {\varepsilon}\right) \widehat{A}_{i,t} \right)
+    \right],
+    \end{align}
+    where $G$ is the number of generated responses to each query $x$ (i.e., the group size), and the importance ratio $w_{i,t}(\theta)$ and advantage $\widehat{A}_{i,t}$ of token $y_{i,t}$ are:
+    \begin{align}
+        w_{i,t}(\theta)=\frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \pi_{\theta_\text{old}} (y_{i,t} | x,y_{i,<t})},\squad
+        \widehat{A}_{i,t} = \widehat{A}_{i} = \frac{r(x, y_i) - \mathrm{mean} \left( \{ r(x, y_i) \}_{i=1}^G \right) }{ \mathrm{std} \left( \{ r(x, y_i) \}_{i=1}^G \right) },
+    \end{align}
+    respectively, where all the tokens in $y_i$ share the same advantage as $\widehat{A}_{i}$.
+
+    \section{Motivation}
+    \label{sec:motivation}
+
+    The growth in model size, sparsity (e.g., in Mixture-of-Experts models), and response length necessitates a large rollout batch size to maximize hardware utilization during RL.
+    To improve sample efficiency, it is standard practice to partition a large batch of rollout data into multiple mini-batches for gradient updates.
+    This procedure inevitably introduces an off-policy learning setting, where responses $y$ are sampled from an old policy $\pi_{\theta_\text{old}}$ rather than the current policy $\pi_\theta$ being optimized.
+    This also explains the necessity of the clipping mechanism in PPO and GRPO, which prevents overly ``off-policy'' samples from being involved in gradient estimation.
+
+    While mechanisms like clipping aim to manage this off-policy discrepancy, we identify a more fundamental issue in GRPO: \textit{its objective is ill-posed}.
+    This problem becomes particularly acute when training large models on long-response tasks, leading to catastrophic model collapse.
+    The ill-posed nature of the GRPO objective stems from a misapplication of importance sampling weights.
+    The principle of importance sampling is to estimate the expectation of a function $f$ under a target distribution $\pi_\text{tar}$ by re-weighting samples drawn from a behavior distribution $\pi_\text{beh}$:
+    \begin{align}
+    \mathbb{E}_{z \sim \pi_\text{tar}} \left[ f(z) \right] = \mathbb{E}_{z \sim \pi_\text{beh}} \left[ \frac{ \pi_\text{tar} (z) }{ \pi_\text{beh} (z)} \, f(z) \right].
+    \end{align}
+    Crucially, this relies on averaging over multiple samples ($N \gg 1$) from the behavior distribution $\pi_\text{beh}$ for the importance weight $\frac{ \pi_\text{tar} (z) }{ \pi_\text{beh} (z)}$ to effectively correct for the distributional mismatch.
+
+    In contrast, GRPO applies the importance weight $\frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \pi_{\theta_\text{old}} (y_{i,t} | x,y_{i,<t})}$ at each token position $t$.
+    Since this weight is based on a single sample $y_{i,t}$ from each next-token distribution $\pi_{\theta_\text{old}}( \cdot | x, y_{i, <t})$, it fails to perform the intended distribution-correction role.
+    Instead, it introduces high-variance noise into the training gradients, which accumulates over long sequences and is exacerbated by the clipping mechanism.
+    We have empirically observed that this can lead to model collapse that is often irreversible.
+    Once the collapse occurs, resuming training is unavailing, even when reverting to a previous checkpoint and meticulously tuning hyperparameters (e.g., the clipping ranges), extending generation length, or switching the RL queries.
+
+    The above observation suggests a fundamental issue in GRPO's design.
+    The failure of the token-level importance weight points to a core principle: \textbf{the unit of optimization objective should match the unit of reward}.
+    Since the reward is granted to the entire sequence, applying off-policy correction at the token level appears problematic.
+    This motivates us to forego the token-level objective and explore utilizing importance weights and performing optimization directly at the \textit{sequence level}.
+
+
+    \section{Algorithm}
+
+    \subsection{GSPO: Group Sequence Policy Optimization}
+
+    While the token-level importance weight $\frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \pi_{\theta_\text{old}} (y_{i,t} | x,y_{i,<t})}$ is problematic in GRPO, we observe that in the context of language generation, the \textit{sequence-level} importance weight $\frac{ \pi_{\theta} (y | x) }{ \pi_{\theta_\text{old}} (y | x)}$ has a clear theoretical meaning: it reflects how far the response $y$ sampled from $\pi_{\theta_\text{old}} (\cdot | x)$ deviates from $\pi_{\theta} (\cdot | x)$, which naturally aligns with the sequence-level reward and can also serve as a meaningful indicator of the clipping mechanism.
+
+    \vspace{1.5ex}
+
+    Based on this straightforward observation, we propose the \textbf{Group Sequence Policy Optimization (GSPO)} algorithm.
+    GSPO employs the following sequence-level optimization objective:
+    \begin{align}
+    \mathcal{J}_\text{GSPO} (\theta) =
+    \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ 
+    \frac{1}{G} \sum_{i=1}^{G}
+    \min \left( s_{i}(\theta)  \widehat{A}_{i},  \, \mathrm{clip} \left( s_{i}(\theta), 1 - {\varepsilon}, 1 + {\varepsilon} \right) \widehat{A}_{i} \right) 
+    \right],
+    \label{equ:gspo}
+    \end{align}
+    where we adopt the group-based advantage estimation:
+    \begin{align}
+    \widehat{A}_{i} = \frac{r(x, y_i) - \mathrm{mean} \left( \{ r(x, y_i) \}_{i=1}^G \right) }{ \mathrm{std} \left( \{ r(x, y_i) \}_{i=1}^G \right) },
+    \end{align}
+    and define the importance ratio $s_{i}(\theta)$ based on sequence likelihood \citep{click}:
+    \begin{align}
+    s_{i}(\theta) = \left( \frac{ \pi_{\theta} (y_i | x) }{ \pi_{\theta_\text{old}} (y_i | x)} \right)^{\frac{1}{|y_i|}}
+    =
+    \exp \left( \frac{1}{|y_i|} \sum_{t=1}^{|y_i|} \log \frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \pi_{\theta_\text{old}} (y_{i,t} | x,y_{i,<t})} \right).
+    \end{align}
+    Therefore, GSPO applies clipping to entire responses instead of individual tokens to exclude the overly ``off-policy'' samples from gradient estimation, which matches both the sequence-level rewarding and optimization.
+    Note that we adopt length normalization in $s_{i}(\theta)$ to reduce the variance and to control  $s_{i}(\theta)$ within a unified numerical range.
+    Otherwise, the likelihood changes of a few tokens can result in dramatic fluctuations of the sequence-level importance ratio, and the importance ratios of responses with different lengths will require varying clipping ranges.
+    We also note that the clipping ranges in GSPO and in previous algorithms (e.g., GRPO) typically differ in order of magnitude due to the distinct definitions of importance ratios.
+
+    \subsection{Gradient Analysis}
+    \label{subsec:gradient}
+
+    We can derive the gradient of the GSPO objective as follows (clipping is omitted for brevity):
+    \begin{align}
+    \nabla_{\theta} \mathcal{J}_\text{GSPO} (\theta)
+    =&\ 
+    \nabla_{\theta} \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ 
+    \frac{1}{G} \sum_{i=1}^{G} s_{i}(\theta) \widehat{A}_{i}
+    \right] \\
+    = &\ 
+    \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ 
+    \frac{1}{G} \sum_{i=1}^{G}
+    s_{i}(\theta) \widehat{A}_{i}
+    \cdot \nabla_{\theta} \log s_{i}(\theta)
+    \right] \\
+    =&\ 
+    \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ 
+    \frac{1}{G} \sum_{i=1}^{G} 
+    \left( \frac{ \pi_{\theta} (y_i | x) }{ \pi_{\theta_\text{old}} (y_i | x)} \right)^{\frac{1}{|y_i|}} \widehat{A}_{i} 
+    \cdot \frac{1}{|y_i|} \sum_{t=1}^{|y_i|} \nabla_{\theta} \log \pi_{\theta} (y_{i,t} | x, y_{i,<t}) 
+    \right].
+    \label{equ:gspo_grad}
+    \end{align}
+    For comparison, the gradient of the GRPO objective is as follows (note that $\widehat{A}_{i,t} = \widehat{A}_{i}$):
+    \begin{align}
+    \nabla_{\theta} \mathcal{J}_\text{GRPO} (\theta) 
+    =&\ 
+    \nabla_{\theta} \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ \frac{1}{G} \sum_{i=1}^{G} \frac{1}{|y_i|} \sum_{t=1}^{|y_i|} 
+    w_{i,t}(\theta) \widehat{A}_{i,t}
+    \right] \\
+    =&\
+    \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ \frac{1}{G} \sum_{i=1}^{G} \widehat{A}_{i} 
+    \cdot \frac{1}{|y_i|} \sum_{t=1}^{|y_i|} 
+    \frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \pi_{\theta_\text{old}} (y_{i,t} | x,y_{i,<t})} 
+    \nabla_{\theta} \log \pi_{\theta} (y_{i,t} | x, y_{i,<t})  
+    \right].
+    \end{align}
+    Therefore, the fundamental distinction between GSPO and GRPO lies in \textit{how they weight the gradients of the log likelihoods of tokens}.
+    In GRPO, the tokens are weighted according to their respective ``importance weight'' $\frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \pi_{\theta_\text{old}} (y_{i,t} | x,y_{i,<t})}$.
+    However, these unequal weights, which can vary among $(0, 1+\varepsilon]$ (for $\widehat{A}_{i} >0$) or $[1-\varepsilon, +\infty)$ (for $\widehat{A}_{i} < 0$), are not negligible, and their impact can accumulate and lead to unpredictable consequences as training progresses.
+    In contrast, GSPO weights all the tokens in a response equally, eliminating this instability factor of GRPO.
+
+    \subsection{GSPO-token: A Token-level Objective Variant}
+
+    In scenarios like multi-turn RL, we may desire a finer-grained advantage adjustment than the sequence level.
+    To this end, we introduce a token-level objective variant of GSPO, namely \textbf{GSPO-token}, to allow token-wise advantage customization:
+    \begin{align}
+    \mathcal{J}_\text{GSPO-token}(\theta)
+    =
+    \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ 
+    \frac{1}{G} \sum_{i=1}^{G} \frac{1}{|y_i|} \sum_{t=1}^{|y_i|} 
+    \min \left( s_{i,t}(\theta) \widehat{A}_{i,t},  \, \mathrm{clip} \left( s_{i,t}(\theta), 1 - {\varepsilon}, 1 + {\varepsilon} \right) \widehat{A}_{i,t} \right) 
+    \right],
+    \label{equ:gspo-token}
+    \end{align}
+    where
+    \begin{align}
+    s_{i,t}(\theta) 
+    = \mathrm{sg} \left[ s_{i}(\theta) \right]  \cdot \frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \mathrm{sg} \left[ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) \right] },
+    \end{align}
+    and $\mathrm{sg}[\cdot]$ denotes only taking the numerical value but stopping the gradient, corresponding to the \texttt{detach} operation in PyTorch.
+    The gradient of GSPO-token can be derived as:
+    \begin{align}
+    \nabla_{\theta} \mathcal{J}_\text{GSPO-token}(\theta)
+    =&\ 
+    \nabla_{\theta} \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ 
+    \frac{1}{G} \sum_{i=1}^{G}
+    \frac{1}{|y_i|} \sum_{t=1}^{|y_i|} 
+    s_{i,t}(\theta) \widehat{A}_{i,t}
+    \right] \\
+    =&\ 
+    \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ 
+    \frac{1}{G} \sum_{i=1}^{G} s_i (\theta)
+    \cdot \frac{1}{|y_i|} \sum_{t=1}^{|y_i|} 
+    \widehat{A}_{i,t} \frac{ \nabla_{\theta} \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }
+    \right] \\
+    =&\ 
+    \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ 
+    \frac{1}{G} \sum_{i=1}^{G}  \left( \frac{ \pi_{\theta} (y_i | x) }{ \pi_{\theta_\text{old}} (y_i | x)} \right)^{\frac{1}{|y_i|}}
+    \cdot \frac{1}{|y_i|} \sum_{t=1}^{|y_i|}
+    \widehat{A}_{i,t} \nabla_{\theta} \log \pi_{\theta} (y_{i,t} | x, y_{i,<t})  
+    \right].
+    \label{equ:gspo-token_grad}
+    \end{align}
+    Note that the term $\frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \mathrm{sg} \left[ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) \right] }$ has a numerical value of 1, so $s_{i,t}(\theta)$ is numerically equal to $s_{i}(\theta)$.
+    Comparing Equation~\eqref{equ:gspo} and~\eqref{equ:gspo-token}, and Equation~\eqref{equ:gspo_grad} and~\eqref{equ:gspo-token_grad}, GSPO-token and GSPO are numerically identical in the optimization objective, clipping condition, and theoretical gradient when we set the advantages of all the tokens in the response $y_i$ to the same value (i.e., $\widehat{A}_{i,t} = \widehat{A}_{i}$), while GSPO-token enjoys the higher flexibility of adjusting the advantages per token.
+
+    </PAPER>
+
+
+    Implement it as a function compute_policy_loss_gspo with the same input and output format as compute_policy_loss_vanilla. Clamp the log of the importance ratio at max 10, and use seq-mean-token-mean loss aggregation.
+
+- id: gspo-with-gradient-hint
+  prompt: |
+    Implement Group Sequence Policy Optimization from the GSPO paper as an alternative to the GRPO loss. Here is the relevant section from the GSPO paper:
+
+
+    <PAPER>
+
+    \section{Preliminaries}
+
+    \paragraph{Notation}
+    In this paper, an autoregressive language model parameterized by $\theta$ is defined as a policy $\pi_\theta$.
+    We use $x$ to denote a query and $\mathcal{D}$ as the query set.
+    Given a response $y$ to a query $x$, its likelihood under the policy $\pi_\theta$ is denoted as $\pi_\theta (y | x)=\prod_{t=1}^{|y|} \pi_\theta (y_t | x, y_{<t} )$ where $|y|$ denotes the number of tokens in $y$.
+    A query-response pair $(x, y)$ can be scored by a verifier $r$, resulting in a reward $r(x, y) \in [ 0, 1 ]$.
+
+    \paragraph{Proximal Policy Optimization (PPO)}
+    Using samples generated from the old policy $\pi_{\theta_\text{old}}$, PPO \citep{ppo} constrains the policy update within a proximal region of the old policy through the clipping mechanism.
+    Specifically, PPO employs the following objective for policy optimization (we omit the KL regularization term hereinafter for brevity, as it is not the focus of this paper):
+    \begin{align}
+    \mathcal{J}_\text{PPO}(\theta) = \mathbb{E}_{ x \sim \mathcal{D},\, y \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ \frac{1}{|y|} \sum_{t=1}^{|y|}
+    \min \left( w_{t}(\theta) \widehat{A}_{t},  \, \mathrm{clip} \left( w_{t}(\theta), 1 - {\varepsilon}, 1 + {\varepsilon}\right) \widehat{A}_{t} \right)
+    \right],
+    \end{align}
+    where the importance ratio of the token $y_t$ is defined as
+    $
+    w_{t}(\theta) = \frac{ \pi_{\theta} (y_{t} | x, y_{<t}) }{ \pi_{\theta_\text{old}} (y_{t} | x,y_{<t})}
+    $,
+    the advantage $\widehat{A}_{t}$ of $y_t$ is estimated by another value model, and $\varepsilon$ is the clipping range of importance ratios.
+
+    \paragraph{Group Relative Policy Optimization (GRPO)}
+    GRPO \citep{grpo} bypasses the need for the value model by computing the relative advantage of each response within a group of responses to the same query.
+    Specifically, GRPO optimizes the following objective:
+    \begin{align}
+    \label{equ:grpo}
+    \mathcal{J}_\text{GRPO}(\theta) = \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[ \frac{1}{G} \sum_{i=1}^{G} \frac{1}{|y_i|} \sum_{t=1}^{|y_i|}
+    \min \left( w_{i,t}(\theta) \widehat{A}_{i,t},  \, \mathrm{clip} \left( w_{i,t}(\theta), 1 - {\varepsilon}, 1 + {\varepsilon}\right) \widehat{A}_{i,t} \right)
+    \right],
+    \end{align}
+    where $G$ is the number of generated responses to each query $x$ (i.e., the group size), and the importance ratio $w_{i,t}(\theta)$ and advantage $\widehat{A}_{i,t}$ of token $y_{i,t}$ are:
+    \begin{align}
+        w_{i,t}(\theta)=\frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \pi_{\theta_\text{old}} (y_{i,t} | x,y_{i,<t})},\squad
+        \widehat{A}_{i,t} = \widehat{A}_{i} = \frac{r(x, y_i) - \mathrm{mean} \left( \{ r(x, y_i) \}_{i=1}^G \right) }{ \mathrm{std} \left( \{ r(x, y_i) \}_{i=1}^G \right) },
+    \end{align}
+    respectively, where all the tokens in $y_i$ share the same advantage as $\widehat{A}_{i}$.
+
+    \section{Algorithm}
+
+    \subsection{GSPO: Group Sequence Policy Optimization}
+
+    While the token-level importance weight $\frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \pi_{\theta_\text{old}} (y_{i,t} | x,y_{i,<t})}$ is problematic in GRPO, we observe that in the context of language generation, the \textit{sequence-level} importance weight $\frac{ \pi_{\theta} (y | x) }{ \pi_{\theta_\text{old}} (y | x)}$ has a clear theoretical meaning: it reflects how far the response $y$ sampled from $\pi_{\theta_\text{old}} (\cdot | x)$ deviates from $\pi_{\theta} (\cdot | x)$, which naturally aligns with the sequence-level reward and can also serve as a meaningful indicator of the clipping mechanism.
+
+    Based on this straightforward observation, we propose the \textbf{Group Sequence Policy Optimization (GSPO)} algorithm.
+    GSPO employs the following sequence-level optimization objective:
+    \begin{align}
+    \mathcal{J}_\text{GSPO} (\theta) =
+    \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[
+    \frac{1}{G} \sum_{i=1}^{G}
+    \min \left( s_{i}(\theta)  \widehat{A}_{i},  \, \mathrm{clip} \left( s_{i}(\theta), 1 - {\varepsilon}, 1 + {\varepsilon} \right) \widehat{A}_{i} \right)
+    \right],
+    \label{equ:gspo}
+    \end{align}
+    where we adopt the group-based advantage estimation:
+    \begin{align}
+    \widehat{A}_{i} = \frac{r(x, y_i) - \mathrm{mean} \left( \{ r(x, y_i) \}_{i=1}^G \right) }{ \mathrm{std} \left( \{ r(x, y_i) \}_{i=1}^G \right) },
+    \end{align}
+    and define the importance ratio $s_{i}(\theta)$ based on sequence likelihood \citep{click}:
+    \begin{align}
+    s_{i}(\theta) = \left( \frac{ \pi_{\theta} (y_i | x) }{ \pi_{\theta_\text{old}} (y_i | x)} \right)^{\frac{1}{|y_i|}}
+    =
+    \exp \left( \frac{1}{|y_i|} \sum_{t=1}^{|y_i|} \log \frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \pi_{\theta_\text{old}} (y_{i,t} | x,y_{i,<t})} \right).
+    \end{align}
+
+    \subsection{GSPO-token: A Token-level Objective Variant}
+
+    In scenarios like multi-turn RL, we may desire a finer-grained advantage adjustment than the sequence level.
+    To this end, we introduce a token-level objective variant of GSPO, namely \textbf{GSPO-token}, to allow token-wise advantage customization:
+    \begin{align}
+    \mathcal{J}_\text{GSPO-token}(\theta)
+    =
+    \mathbb{E}_{ x \sim \mathcal{D},\, \{y_i\}_{i=1}^G \sim \pi_{\theta_\text{old}}( \cdot | x) }
+    \left[
+    \frac{1}{G} \sum_{i=1}^{G} \frac{1}{|y_i|} \sum_{t=1}^{|y_i|}
+    \min \left( s_{i,t}(\theta) \widehat{A}_{i,t},  \, \mathrm{clip} \left( s_{i,t}(\theta), 1 - {\varepsilon}, 1 + {\varepsilon} \right) \widehat{A}_{i,t} \right)
+    \right],
+    \label{equ:gspo-token}
+    \end{align}
+    where
+    \begin{align}
+    s_{i,t}(\theta)
+    = \mathrm{sg} \left[ s_{i}(\theta) \right]  \cdot \frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \mathrm{sg} \left[ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) \right] },
+    \end{align}
+    and $\mathrm{sg}[\cdot]$ denotes only taking the numerical value but stopping the gradient, corresponding to the \texttt{detach} operation in PyTorch.
+
+    Note that the term $\frac{ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) }{ \mathrm{sg} \left[ \pi_{\theta} (y_{i,t} | x, y_{i,<t}) \right] }$ has a numerical value of 1, so $s_{i,t}(\theta)$ is numerically equal to $s_{i}(\theta)$.
+
+    </PAPER>
+
+
+    Implement it as a function compute_policy_loss_gspo with the same input and output format as compute_policy_loss_vanilla. Clamp the log of the importance ratio at max 10, and use seq-mean-token-mean loss aggregation.
+
+    IMPORTANT IMPLEMENTATION NOTE: A naive implementation that broadcasts the sequence-level ratio
+    to all tokens will produce correct forward values but INCORRECT gradients. The test harness
+    validates both values AND gradients via backpropagation. You must use the GSPO-token formulation
+    from the paper: construct the per-token log importance ratio as
+    `log_prob - log_prob.detach() + seq_log_ratio.detach().unsqueeze(-1)` so that gradients flow
+    through individual token log-probs independently while the forward value equals the sequence-level
+    ratio. This is the `.detach()` trick described in the paper's GSPO-token section.

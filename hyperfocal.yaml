@@ -1,0 +1,15 @@
+version: "1.0"
+
+environment:
+  name: verl-rl-algorithms
+  description: "Implement RL algorithms from academic papers inside the VERL framework"
+
+paths:
+  root: /hyperfocal/env
+  environmentDist: environment/dist
+  workspace: workspace
+
+agent:
+  type: claude-code
+  defaultModel: claude-opus-4-6
+  awsAccess: false

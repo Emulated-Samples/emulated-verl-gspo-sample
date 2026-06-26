@@ -1,0 +1,6 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.8.0+cpu
+omegaconf>=2.3.0
+numpy<2.0.0
+packaging
+tensordict>=0.8.0,<=0.9.1,!=0.9.0
